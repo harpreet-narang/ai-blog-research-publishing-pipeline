@@ -1,0 +1,17 @@
+{
+  "approve": {
+    "decision": "approve",
+    "reviewer": "editor",
+    "feedback": "Approved for publishing."
+  },
+  "revise": {
+    "decision": "revise",
+    "reviewer": "editor",
+    "feedback": "Make the opening more concrete, remove the unsupported statistic, and shorten the conclusion."
+  },
+  "reject": {
+    "decision": "reject",
+    "reviewer": "editor",
+    "feedback": "The angle is too generic. Do not publish."
+  }
+}
