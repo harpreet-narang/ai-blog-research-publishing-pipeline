@@ -6,7 +6,7 @@ This is not a "prompt → blog post" generator.
 
 The pipeline researches current demand first, creates topic opportunities tied to real sources, pauses for a human to choose the direction, performs deeper research, drafts the article, generates a hero-image brief, pauses again for editorial approval, and only then prepares the content for publishing.
 
-> **Portfolio implementation:** this repository is a sanitized public version of a workflow pattern used in real automation work. It contains no private production credentials, customer data, internal endpoints, or proprietary project code.
+> **Portfolio implementation:** this repository is a sanitized public version of content-automation workflows I have built and worked on in private projects. It contains no private production credentials, customer data, internal endpoints, or proprietary project code.
 
 ## What this project demonstrates
 
