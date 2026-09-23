@@ -1,0 +1,990 @@
+{
+  "name": "AI Blog Research & Publishing Pipeline - Portfolio Demo",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "blog-research-pipeline",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "content-intake",
+      "name": "Content Brief Intake"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $json.body ?? $json;\nconst siteUrl = String(src.site_url ?? '').trim();\nconst businessSummary = String(src.business_summary ?? '').trim();\nconst audience = String(src.audience ?? '').trim();\nconst contentGoal = String(src.content_goal ?? '').trim();\nconst existingTopics = Array.isArray(src.existing_topics) ? src.existing_topics.map(String) : [];\n\nif (!businessSummary) throw new Error('business_summary is required');\nif (!audience) throw new Error('audience is required');\n\nreturn [{\n  json: {\n    run_id: `content_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,\n    site_url: siteUrl,\n    business_summary: businessSummary,\n    audience,\n    content_goal: contentGoal || 'Create useful content that supports business goals',\n    existing_topics: existingTopics,\n    state: 'RECEIVED',\n    started_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "normalize-input",
+      "name": "Normalize Content Brief"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Create 4 focused web-research queries for content opportunity discovery.\\n\\nBusiness: {{ $json.business_summary }}\\nAudience: {{ $json.audience }}\\nContent goal: {{ $json.content_goal }}\\nExisting topics to avoid: {{ JSON.stringify($json.existing_topics) }}\\n\\nQueries should help discover recent problems, questions, market shifts, practical use cases, or credible evidence relevant to this audience. Do not write article titles yet.",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a research planner. Generate natural search queries, not keyword-stuffed strings. Prefer queries that can surface credible, current evidence."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        480,
+        0
+      ],
+      "id": "query-planner",
+      "name": "Plan Research Queries"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        704,
+        448
+      ],
+      "id": "chat-model",
+      "name": "Chat Model"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\\n  \"queries\": [\\n    \"AI automation operations challenges 2026\",\\n    \"workflow automation adoption small business 2026\",\\n    \"AI agent reliability business workflows\",\\n    \"operations leaders manual work automation examples\"\\n  ]\\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        448,
+        448
+      ],
+      "id": "query-parser",
+      "name": "Research Query Parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Normalize Content Brief').first().json;\nconst raw = $json.output && typeof $json.output === 'object' ? $json.output : $json;\nconst queries = Array.isArray(raw.queries) ? raw.queries.filter(Boolean).slice(0,4) : [];\nif (!queries.length) throw new Error('No research queries were generated');\nreturn queries.map((query, index) => ({\n  json: {\n    ...base,\n    state: 'RESEARCHING',\n    query_index: index + 1,\n    query: String(query)\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "split-queries",
+      "name": "Split Research Queries"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.tavily.com/search",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ api_key: $env.TAVILY_API_KEY, query: $json.query, search_depth: 'advanced', max_results: 5, include_answer: false, include_raw_content: false }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        976,
+        0
+      ],
+      "id": "discovery-search",
+      "name": "Discovery Web Research"
+    },
+    {
+      "parameters": {
+        "jsCode": "const responses = $input.all();\nconst base = $('Normalize Content Brief').first().json;\nconst evidence = [];\n\nfor (const response of responses) {\n  const results = Array.isArray(response.json.results) ? response.json.results : [];\n  for (const r of results) {\n    if (!r?.url) continue;\n    evidence.push({\n      title: String(r.title ?? ''),\n      url: String(r.url),\n      snippet: String(r.content ?? '').slice(0,1800),\n      score: Number(r.score ?? 0)\n    });\n  }\n}\n\nconst deduped = [];\nconst seen = new Set();\nfor (const e of evidence.sort((a,b) => b.score - a.score)) {\n  if (seen.has(e.url)) continue;\n  seen.add(e.url);\n  deduped.push(e);\n}\n\nreturn [{\n  json: {\n    ...base,\n    state: 'RESEARCH_COMPLETE',\n    discovery_evidence: deduped.slice(0,16),\n    evidence_count: deduped.length\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1232,
+        0
+      ],
+      "id": "evidence-pack",
+      "name": "Build Evidence Pack"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Generate exactly five evidence-backed blog topic opportunities.\\n\\nBusiness: {{ $json.business_summary }}\\nAudience: {{ $json.audience }}\\nContent goal: {{ $json.content_goal }}\\nExisting topics to avoid: {{ JSON.stringify($json.existing_topics) }}\\n\\nResearch evidence:\\n{{ JSON.stringify($json.discovery_evidence) }}\\n\\nFor each topic, include a specific angle, reader intent, why_now, supporting_urls chosen only from the evidence provided, confidence from 0 to 1, and an overlap_warning if it resembles an existing topic. Do not invent trends, statistics, or source URLs.",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a content strategist working from supplied research evidence. Strong business relevance and evidence quality matter more than catchy titles."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        1488,
+        0
+      ],
+      "id": "topic-generator",
+      "name": "Generate 5 Topic Opportunities"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\\n  \"topics\": [\\n    {\\n      \"title\": \"Why AI Automations Fail Quietly in Production\",\\n      \"angle\": \"Explain silent degradation and practical safeguards.\",\\n      \"target_reader\": \"Operations leaders evaluating AI automation\",\\n      \"intent\": \"Problem-aware / solution research\",\\n      \"why_now\": \"Recent evidence points to reliability becoming a deployment concern.\",\\n      \"supporting_urls\": [\"https://example.com/source\"],\\n      \"confidence\": 0.86,\\n      \"overlap_warning\": \"none\"\\n    }\\n  ]\\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1488,
+        448
+      ],
+      "id": "topic-parser",
+      "name": "Topic Output Parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Build Evidence Pack').first().json;\nconst raw = $json.output && typeof $json.output === 'object' ? $json.output : $json;\nconst topics = Array.isArray(raw.topics) ? raw.topics.slice(0,5) : [];\nif (topics.length !== 5) throw new Error('Expected exactly 5 topic opportunities');\n\nreturn [{\n  json: {\n    ...base,\n    state: 'WAITING_FOR_TOPIC_SELECTION',\n    topics,\n    topic_selection_url: $execution.resumeUrl,\n    topic_selection_instruction: 'POST { topic_number: 1-5, reviewer: \"name\" } to the resume URL.'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1744,
+        0
+      ],
+      "id": "topic-packet",
+      "name": "Prepare Topic Selection"
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {
+          "webhookSuffix": "topic-selection"
+        }
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2000,
+        0
+      ],
+      "id": "wait-topic",
+      "name": "Wait for Topic Selection"
+    },
+    {
+      "parameters": {
+        "jsCode": "const packet = $('Prepare Topic Selection').first().json;\nconst body = $json.body ?? $json;\nconst topicNumber = Number(body.topic_number ?? 0);\nif (!Number.isInteger(topicNumber) || topicNumber < 1 || topicNumber > packet.topics.length) {\n  throw new Error('topic_number must be an integer between 1 and 5');\n}\nconst selected = packet.topics[topicNumber - 1];\n\nreturn [{\n  json: {\n    ...packet,\n    state: 'TOPIC_SELECTED',\n    selected_topic_number: topicNumber,\n    selected_topic: selected,\n    topic_selected_by: String(body.reviewer ?? 'unknown'),\n    topic_selected_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2256,
+        0
+      ],
+      "id": "normalize-topic-selection",
+      "name": "Normalize Topic Selection"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.tavily.com/search",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ api_key: $env.TAVILY_API_KEY, query: $json.selected_topic.title + ' ' + $json.selected_topic.angle + ' ' + $json.business_summary, search_depth: 'advanced', max_results: 8, include_answer: false, include_raw_content: false }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2512,
+        0
+      ],
+      "id": "deep-research",
+      "name": "Deep Research Selected Topic"
+    },
+    {
+      "parameters": {
+        "jsCode": "const selection = $('Normalize Topic Selection').first().json;\nconst results = Array.isArray($json.results) ? $json.results : [];\nconst evidence = results.filter(r => r?.url).map(r => ({\n  title: String(r.title ?? ''),\n  url: String(r.url),\n  snippet: String(r.content ?? '').slice(0,2200),\n  score: Number(r.score ?? 0)\n}));\n\nreturn [{\n  json: {\n    ...selection,\n    state: 'DEEP_RESEARCH_COMPLETE',\n    deep_research_evidence: evidence\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2768,
+        0
+      ],
+      "id": "normalize-deep-research",
+      "name": "Normalize Deep Research"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a useful evidence-aware blog article package.\\n\\nBusiness context: {{ $json.business_summary }}\\nAudience: {{ $json.audience }}\\nContent goal: {{ $json.content_goal }}\\nSelected topic: {{ JSON.stringify($json.selected_topic) }}\\nResearch evidence: {{ JSON.stringify($json.deep_research_evidence) }}\\n\\nRequirements:\\n- write for the target reader, not for search engines\\n- do not fabricate statistics, quotes, studies, customer examples, or source claims\\n- retain source URLs from the supplied evidence\\n- if a claim is useful but not adequately supported, place it in claims_to_check instead of presenting it as fact\\n- avoid generic AI filler\\n- produce practical examples where possible without pretending they are real customer cases",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are an evidence-conscious B2B editor. Clarity, usefulness, and factual restraint matter more than sounding impressive."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        3024,
+        0
+      ],
+      "id": "article-generator",
+      "name": "Generate Article Package"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\\n  \"title\": \"Article title\",\\n  \"slug\": \"article-title\",\\n  \"excerpt\": \"Short excerpt\",\\n  \"body_markdown\": \"# Article title\\\\n\\\\nArticle body...\",\\n  \"meta_title\": \"SEO title\",\\n  \"meta_description\": \"SEO description\",\\n  \"sources\": [\"https://example.com/source\"],\\n  \"claims_to_check\": [\"Claim requiring additional verification\"]\\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        3024,
+        448
+      ],
+      "id": "article-parser",
+      "name": "Article Output Parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "const research = $('Normalize Deep Research').first().json;\nconst article = $json.output && typeof $json.output === 'object' ? $json.output : $json;\nreturn [{\n  json: {\n    ...research,\n    state: 'DRAFT_READY',\n    article\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3280,
+        0
+      ],
+      "id": "normalize-draft",
+      "name": "Normalize Draft"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Create a visual creative brief for the hero image of this article.\\n\\nArticle title: {{ $json.article.title }}\\nExcerpt: {{ $json.article.excerpt }}\\nAudience: {{ $json.audience }}\\n\\nReturn a concept that creates curiosity rather than simply illustrating the headline. Avoid generic stock-photo ideas, floating AI brains, neon robots, dashboards full of random charts, and excessive text in the image.",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a visual creative director. Produce one strong, specific hero-image concept suitable for a professional blog."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        3536,
+        0
+      ],
+      "id": "hero-brief-generator",
+      "name": "Generate Hero Image Brief"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\\n  \"concept\": \"Core visual idea\",\\n  \"scene\": \"What is visible\",\\n  \"composition\": \"Camera/framing/layout\",\\n  \"mood\": \"Visual tone\",\\n  \"avoid\": [\"generic robot\", \"text-heavy graphic\"],\\n  \"generation_prompt\": \"Optional image-generation prompt\"\\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        3536,
+        448
+      ],
+      "id": "hero-parser",
+      "name": "Hero Brief Parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "const draft = $('Normalize Draft').first().json;\nconst hero = $json.output && typeof $json.output === 'object' ? $json.output : $json;\nreturn [{\n  json: {\n    ...draft,\n    state: 'WAITING_FOR_EDITORIAL_REVIEW',\n    hero_brief: hero,\n    editorial_review_url: $execution.resumeUrl,\n    editorial_instruction: 'POST decision=approve, revise, or reject with reviewer and optional feedback.'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3792,
+        0
+      ],
+      "id": "editorial-packet",
+      "name": "Prepare Editorial Review"
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {
+          "webhookSuffix": "editorial-review"
+        }
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        4048,
+        0
+      ],
+      "id": "wait-editor",
+      "name": "Wait for Editorial Review"
+    },
+    {
+      "parameters": {
+        "jsCode": "const packet = $('Prepare Editorial Review').first().json;\nconst body = $json.body ?? $json;\nlet decision = String(body.decision ?? '').trim().toLowerCase();\nif (!['approve','revise','reject'].includes(decision)) decision = 'reject';\n\nreturn [{\n  json: {\n    ...packet,\n    editorial_decision: decision,\n    editorial_reviewer: String(body.reviewer ?? 'unknown'),\n    editorial_feedback: String(body.feedback ?? ''),\n    editorial_decided_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4304,
+        0
+      ],
+      "id": "normalize-editorial",
+      "name": "Normalize Editorial Decision"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "approve-editor",
+              "leftValue": "={{ $json.editorial_decision }}",
+              "rightValue": "approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4560,
+        0
+      ],
+      "id": "editorial-approved",
+      "name": "Editorial Approved?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "revise-editor",
+              "leftValue": "={{ $json.editorial_decision }}",
+              "rightValue": "revise",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4800,
+        128
+      ],
+      "id": "revision-requested",
+      "name": "Revision Requested?"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Revise this article package using the editor's feedback.\\n\\nSelected topic: {{ JSON.stringify($json.selected_topic) }}\\nCurrent article: {{ JSON.stringify($json.article) }}\\nEditor feedback: {{ $json.editorial_feedback }}\\nResearch evidence: {{ JSON.stringify($json.deep_research_evidence) }}\\n\\nReturn a complete replacement article package. Preserve source discipline. Do not invent facts to satisfy the feedback.",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are revising an evidence-aware article after human editorial feedback. Revision is not approval."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.6,
+      "position": [
+        5040,
+        32
+      ],
+      "id": "revision-chain",
+      "name": "Revise Article"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Normalize Editorial Decision').first().json;\nconst revised = $json.output && typeof $json.output === 'object' ? $json.output : $json;\nreturn [{\n  json: {\n    ...base,\n    state: 'WAITING_FOR_SECOND_REVIEW',\n    revised_article: revised,\n    second_review_url: $execution.resumeUrl\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5296,
+        32
+      ],
+      "id": "second-packet",
+      "name": "Prepare Second Review"
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {
+          "webhookSuffix": "second-editorial-review"
+        }
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        5552,
+        32
+      ],
+      "id": "wait-second-editor",
+      "name": "Wait for Second Editorial Review"
+    },
+    {
+      "parameters": {
+        "jsCode": "const packet = $('Prepare Second Review').first().json;\nconst body = $json.body ?? $json;\nlet decision = String(body.decision ?? '').trim().toLowerCase();\nif (!['approve','reject'].includes(decision)) decision = 'reject';\nreturn [{\n  json: {\n    ...packet,\n    second_editorial_decision: decision,\n    second_editorial_reviewer: String(body.reviewer ?? 'unknown'),\n    second_editorial_feedback: String(body.feedback ?? ''),\n    second_editorial_decided_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5808,
+        32
+      ],
+      "id": "normalize-second-review",
+      "name": "Normalize Second Review"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "approve-second",
+              "leftValue": "={{ $json.second_editorial_decision }}",
+              "rightValue": "approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6064,
+        32
+      ],
+      "id": "second-approved",
+      "name": "Revised Draft Approved?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const article = $json.revised_article ?? $json.article;\nreturn [{\n  json: {\n    ...$json,\n    state: 'READY_TO_PUBLISH',\n    final_article: article,\n    cms_payload: {\n      title: article.title,\n      slug: article.slug,\n      excerpt: article.excerpt,\n      body_markdown: article.body_markdown,\n      meta_title: article.meta_title,\n      meta_description: article.meta_description,\n      hero_brief: $json.hero_brief,\n      sources: article.sources ?? [],\n      status: 'draft'\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6320,
+        -96
+      ],
+      "id": "cms-payload",
+      "name": "Prepare CMS Payload"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CMS_PUBLISH_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CMS_API_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.cms_payload) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6576,
+        -224
+      ],
+      "id": "cms-publish",
+      "name": "Optional CMS Publish (Disabled)",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    run_id: $json.run_id,\n    final_state: 'COMPLETE',\n    selected_topic: $json.selected_topic?.title ?? null,\n    article_title: ($json.final_article ?? $json.article)?.title ?? null,\n    editorial_decision: $json.editorial_decision ?? null,\n    second_editorial_decision: $json.second_editorial_decision ?? null,\n    cms_payload_ready: Boolean($json.cms_payload),\n    source_count: Array.isArray(($json.final_article ?? $json.article)?.sources) ? ($json.final_article ?? $json.article).sources.length : 0,\n    completed_at: new Date().toISOString(),\n    note: 'CMS publishing is disabled by default in the portfolio workflow.'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6576,
+        -64
+      ],
+      "id": "final-state",
+      "name": "Create Final Audit State"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    run_id: $json.run_id,\n    final_state: 'REJECTED',\n    selected_topic: $json.selected_topic?.title ?? null,\n    editorial_decision: $json.editorial_decision ?? $json.second_editorial_decision ?? 'reject',\n    rejection_feedback: $json.second_editorial_feedback ?? $json.editorial_feedback ?? '',\n    published: false,\n    completed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6320,
+        224
+      ],
+      "id": "stop-rejected",
+      "name": "Stop Safely - Not Published"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Content Brief Intake": {
+      "main": [
+        [
+          {
+            "node": "Normalize Content Brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Content Brief": {
+      "main": [
+        [
+          {
+            "node": "Plan Research Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Plan Research Queries",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Generate 5 Topic Opportunities",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Generate Article Package",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Generate Hero Image Brief",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Revise Article",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Research Query Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Plan Research Queries",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Research Queries": {
+      "main": [
+        [
+          {
+            "node": "Split Research Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Research Queries": {
+      "main": [
+        [
+          {
+            "node": "Discovery Web Research",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discovery Web Research": {
+      "main": [
+        [
+          {
+            "node": "Build Evidence Pack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Evidence Pack": {
+      "main": [
+        [
+          {
+            "node": "Generate 5 Topic Opportunities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Topic Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Generate 5 Topic Opportunities",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate 5 Topic Opportunities": {
+      "main": [
+        [
+          {
+            "node": "Prepare Topic Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Topic Selection": {
+      "main": [
+        [
+          {
+            "node": "Wait for Topic Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Topic Selection": {
+      "main": [
+        [
+          {
+            "node": "Normalize Topic Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Topic Selection": {
+      "main": [
+        [
+          {
+            "node": "Deep Research Selected Topic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deep Research Selected Topic": {
+      "main": [
+        [
+          {
+            "node": "Normalize Deep Research",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Deep Research": {
+      "main": [
+        [
+          {
+            "node": "Generate Article Package",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Article Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Generate Article Package",
+            "type": "ai_outputParser",
+            "index": 0
+          },
+          {
+            "node": "Revise Article",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Article Package": {
+      "main": [
+        [
+          {
+            "node": "Normalize Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Draft": {
+      "main": [
+        [
+          {
+            "node": "Generate Hero Image Brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hero Brief Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Generate Hero Image Brief",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Hero Image Brief": {
+      "main": [
+        [
+          {
+            "node": "Prepare Editorial Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Editorial Review": {
+      "main": [
+        [
+          {
+            "node": "Wait for Editorial Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Editorial Review": {
+      "main": [
+        [
+          {
+            "node": "Normalize Editorial Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Editorial Decision": {
+      "main": [
+        [
+          {
+            "node": "Editorial Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Editorial Approved?": {
+      "main": [
+        [
+          {
+            "node": "Prepare CMS Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Revision Requested?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revision Requested?": {
+      "main": [
+        [
+          {
+            "node": "Revise Article",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop Safely - Not Published",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revise Article": {
+      "main": [
+        [
+          {
+            "node": "Prepare Second Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Second Review": {
+      "main": [
+        [
+          {
+            "node": "Wait for Second Editorial Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Second Editorial Review": {
+      "main": [
+        [
+          {
+            "node": "Normalize Second Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Second Review": {
+      "main": [
+        [
+          {
+            "node": "Revised Draft Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revised Draft Approved?": {
+      "main": [
+        [
+          {
+            "node": "Prepare CMS Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop Safely - Not Published",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare CMS Payload": {
+      "main": [
+        [
+          {
+            "node": "Optional CMS Publish (Disabled)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create Final Audit State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "portfolio-blog-pipeline-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
